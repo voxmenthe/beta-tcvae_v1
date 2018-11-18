@@ -23,6 +23,8 @@ def estimate_entropies(qz_samples, qz_params, q_dist):
 
     Inputs:
     -------
+        #@@# S is probably batch size
+        #@@# K is definitely num latent variables
         qz_samples (K, S) Variable
         qz_params  (N, K, nparams) Variable
     """
@@ -35,6 +37,7 @@ def estimate_entropies(qz_samples, qz_params, q_dist):
     assert(nparams == q_dist.nparams)
     assert(K == qz_params.size(1))
 
+    #@@# K is probably the number of latent variables
     marginal_entropies = torch.zeros(K).cuda()
     joint_entropy = torch.zeros(1).cuda()
 
@@ -107,6 +110,9 @@ def analytical_NLL(qz_params, q_dist, prior_dist, qz_samples=None):
 def elbo_decomposition(vae, dataset_loader):
     N = len(dataset_loader.dataset)  # number of data samples
     K = vae.z_dim                    # number of latent variables
+    #@@# some subset of batch size
+    #@@# if you increased S you might get a better estimate of your log-likelihood
+    #@@# increasing S to 2 would double the number of forward passes through the decoder
     S = 1                            # number of latent variable samples
     nparams = vae.q_dist.nparams
 
@@ -118,14 +124,26 @@ def elbo_decomposition(vae, dataset_loader):
     for xs in dataset_loader:
         batch_size = xs.size(0)
         xs = Variable(xs.view(batch_size, -1, 64, 64).cuda(), volatile=True)
+        #@@# encoding some batch of data
+        #@@# for each data point you have a batch_size by K-dimensional representation
         z_params = vae.encoder.forward(xs).view(batch_size, K, nparams)
+        #@@# qz_params starts off as the latent representation of the first batch of data
+        #@@# and we end up with the encoded representation of every data point
+        #@@# if that is what they do then this is not production code
         qz_params[n:n + batch_size] = z_params.data
         n += batch_size
 
-        # estimate reconstruction term
+        #@@# for each batch
+        # estimate reconstruction term from each of the encoder
         for _ in range(S):
+            #@@# q_dist is the Normal class defined in lib
+            #@@# z is the latent representation we sampled from q
+            
             z = vae.q_dist.sample(params=z_params)
+            #@@# generate a reconstruction from the latent samples
+            #@@# decode and see what we get from decoding a single dimension
             x_params = vae.decoder.forward(z)
+            #@@# compute log likelihood of reconstructed samples under the data distribution
             logpx += vae.x_dist.log_density(xs, params=x_params).view(batch_size, -1).data.sum()
     # Reconstruction term
     logpx = logpx / (N * S)
@@ -142,6 +160,7 @@ def elbo_decomposition(vae, dataset_loader):
     marginal_entropies, joint_entropy = estimate_entropies(qz_samples, qz_params, vae.q_dist)
 
     if hasattr(vae.q_dist, 'NLL'):
+        #@@# nlogqz_condx. qz_condx is probably q(z|n)
         nlogqz_condx = vae.q_dist.NLL(qz_params).mean(0)
     else:
         nlogqz_condx = - vae.q_dist.log_density(qz_samples,
@@ -151,14 +170,27 @@ def elbo_decomposition(vae, dataset_loader):
         pz_params = vae._get_prior_params(N * K).contiguous().view(N, K, -1)
         nlogpz = vae.prior_dist.NLL(pz_params, qz_params).mean(0)
     else:
+        #@@# computing the log density of qz samples under the prior
         nlogpz = - vae.prior_dist.log_density(qz_samples.transpose(0, 1)).mean(0)
 
     # nlogqz_condx, nlogpz = analytical_NLL(qz_params, vae.q_dist, vae.prior_dist)
     nlogqz_condx = nlogqz_condx.data
     nlogpz = nlogpz.data
 
+    #@@# If you have the KL between the product and its decomposition
+    #@@# then can be represented as the joint entropy of 
+    #@@# the product - marginal entropies of the decomposition terms
+    #@@# If you draw a bunch of zs from q(z) - take samples of log(q(z)) 
+    #@@# for a z that is drawn from the distribution q(z) and then average
+    #@@# then you get the expectation log(q(z)) under q(z)
+    #@@# and this is negative entropy of q - entropy measures how random a
+    #@@# distribution is
+
+
     # Independence term
     # KL(q(z)||prod_j q(z_j)) = log q(z) - sum_j log q(z_j)
+    #@@# Total correlation term
+    #@@# 
     dependence = (- joint_entropy + marginal_entropies.sum())[0]
 
     # Information term
@@ -167,6 +199,8 @@ def elbo_decomposition(vae, dataset_loader):
 
     # Dimension-wise KL term
     # sum_j KL(q(z_j)||p(z_j)) = sum_j (log q(z_j) - log p(z_j))
+    #@@# (log q(z_j) - log p(z_j) = log ( q(z_j) / p(z_j))
+    #@@# summing over j which is an index over number of latent dimensions
     dimwise_kl = (- marginal_entropies + nlogpz).sum()
 
     # Compute sum of terms analytically
